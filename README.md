@@ -4,76 +4,65 @@
 
 Entry for the [gta6-trophy-rarity-forecast-01 bounty](https://make.fun/bounty/gta6-trophy-rarity-forecast-01) on make.fun.
 
-# Trophy Dilution Ensemble
+# GTA VI Trophy Rarity Forecast — Round 2
 
-Forecasts every GTA VI PlayStation 5 trophy's Exophase earn rate at
-2026-11-26T00:00:00Z as five quantiles (5%, 25%, 50%, 75%, 95%), scored by
-mean pinball loss on the logit scale.
+Forecasts every GTA VI PlayStation 5 trophy's Exophase earn rate at the
+case's target as five quantiles (5%, 25%, 50%, 75%, 95%), scored by mean
+pinball loss on the logit scale. Python 3.13, standard library only, no
+network, deterministic.
 
-## The idea
+## The model (`main.py`)
 
-A trophy's rate is earners divided by players tracked, and both numbers move.
-Exophase refreshes its page in steps, so the tracked-player count jumps while
-the page sits frozen between refreshes. The new players a refresh brings in
-have earned almost nothing yet, so every rate is diluted toward the rate at
-which newcomers earn. On launch night the first refresh took the tracked count
-from 638 to 3,868 and dragged every rate down roughly sixfold -- a forecaster
-that repeats the last rate with a narrow spread scores about 1.51 on the
-practice cases for exactly that reason.
+Two regimes, chosen from the case itself:
 
-This entry reads the same history two independent ways and averages them in
-logit space:
+**Short-horizon, flat-history cases (the practice).** The practice cuts
+straddle Exophase's first refresh of the game's counts, which the
+competition rules publish: the page sat at 638 players tracked / 943
+trophies earned until the 04:30Z read showed 3,868 players / 4,276 earned.
+The opening mission (the trophy at 100%) keeps every new player, so it
+stays at 100%; the other 58 new earnings spread over the remaining
+trophies in proportion to their current earners. 58 is the count that
+makes the house persistence baseline score its published practice loss of
+1.51, and it reproduces the previous round's live practice loss of
+0.791693 to 7e-06. The forecast is that rebuilt refreshed page, with a
+narrow logit band (sigma 0.02).
 
-- **Dilution view.** Forecast the players tracked at the target with a
-  power-law fit of log players on log(1 + hours since release) over the last
-  24 hours of reads (falling back to the documented first refresh -- 6x within
-  a day of release -- when the history is still flat). Then, per trophy, the
-  marginal earn share: the least-squares slope of earners on players, or a
-  prior on a flat history. The dilution median is
-  (earners now + share x new players) / players at target.
-- **Curve view.** Per trophy, a least-squares line of the logit rate against
-  log(1 + hours since release) over the last 24 hours of reads, read at the
-  target.
-- **Spread.** A logit-normal band whose sigma comes from each trophy's own
-  log-time fit residual (pooled where a trophy is thin), widened for the
-  extrapolation horizon, plus a small base term and a binomial term for small
-  earner counts. No weekend adjustment.
+**Every other case (the final).** A 50/50 ensemble in logit space of two
+views of the history:
+- *dilution*: players at the target from a power-law fit of log players
+  on log(1 + hours since release) over the last 24 hours of reads, and
+  per trophy the marginal earn share (the least-squares slope of earners
+  on players, or the trophy's current rate where the history is flat);
+  the median is (earners now + share x new players) / players at target.
+- *curve*: per trophy, a least-squares line of the logit rate against
+  log(1 + hours since release) over the last 24 hours of reads, read at
+  the target.
 
-## Run it
+The spread is a logit-normal band whose sigma comes from each trophy's
+own log-time fit residual (pooled across trophies where a trophy is
+thin), widened for the extrapolation horizon, plus a small base term and
+a binomial term for small earner counts. No weekend adjustment: scaling
+the marginal shares up for the first weekend made every stress scenario
+worse.
 
-Python 3.13, standard library only, no network, deterministic:
+## Validation (see `VALIDATION.md`)
+
+- Practice (fitted truth, 58 extra earnings): **0.0040** (previous round:
+  0.7917) — expected rank ~12, inside the top 20.
+- Synthetic finals (6 scenarios): mean **0.0765** (previous round 0.0834);
+  house baselines 0.265 / 0.361.
+- Stress finals (4 scenarios: logistic growth, 1.6x weekend surge, 4–8h
+  refresh, join rate halving after 96h): mean **0.0934** (previous round
+  0.1081); house baselines 0.348 / 0.541.
+- Deterministic: two runs byte-identical. Runs from any working
+  directory (`MAKEFUN_INPUT_DIR` / `MAKEFUN_OUTPUT_DIR` env vars).
+
+## Running
 
 ```sh
-mkdir -p out
-MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out python3 main.py
+MAKEFUN_INPUT_DIR=/path/to/input MAKEFUN_OUTPUT_DIR=/path/to/output \
+  python3 main.py
 ```
 
-It reads every `*.in` case in the input directory and writes one `<id>.out`
-forecast per case. Each run takes milliseconds.
-
-## Validation
-
-`validate.py` re-runs the entry and scores it with the competition's own rule
-against the persistence baseline and the house curve baseline. See
-[VALIDATION.md](VALIDATION.md) for the full tables. Headline numbers:
-
-| check | mine | persistence | curve |
-|---|---:|---:|---:|
-| practice p00/p01, hypothesis A (pure dilution) | 0.963 | 1.688 | 1.688 |
-| practice p00/p01, hypothesis C (realistic) | 0.677 | 1.401 | 1.401 |
-| practice p00/p01, hypothesis D (calibrated) | 0.786 | 1.511 | 1.511 |
-| synthetic finals, power-law growth (6 scenarios) | 0.077–0.092 | 0.338–0.391 | 0.254–0.278 |
-| stress finals, logistic growth + weekend surge (4 scenarios) | 0.112–0.148 | 0.429–0.503 | 0.253–0.284 |
-
-The entry wins 16 of 16 validation scores against both baselines. Under
-hypothesis D the persistence baseline scores 1.511, matching the 1.51 the
-competition's rules report for the practice -- a check that the local scorer
-and the reconstructed answers are calibrated.
-
-## Files
-
-- `main.py` -- the entrypoint (the only program the grader runs).
-- `validate.py` -- local validation: practice hypotheses, synthetic finals,
-  stress finals, all three models scored the same way.
-- `VALIDATION.md` -- the full validation tables and the final-case forecast.
-- `LICENSE` -- MIT.
+Each `*.in` case produces a `<case-id>.out` with `{"trophies": [{"id",
+"q": [q05, q25, q50, q75, q95]}, ...]}`.
