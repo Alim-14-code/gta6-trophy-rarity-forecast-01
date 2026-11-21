@@ -5,6 +5,49 @@ Harness: `~/workspace/makefun-bounties/gta6-trophy-rarity-forecast-01-validation
 (`sim.py`, `score.py`, `tune.py`, `stress.py`). R1 = the live entry
 "Trophy Dilution Ensemble" (submission `01a1f3f5-fa27-71e0-8634-91ae74a0b63b`).
 
+## Round 3 (21 Nov 2026, before 18:30 close)
+
+R2 live practice loss was 0.15285 (rank 1,129), not the 0.0040 predicted
+locally. The shipped practice cases p00/p01 are BOTH frozen-638 pages
+straddling the refresh, but the live practice is cut AFTER the refresh:
+its checkpoints sit on the refreshed, stable page, so R2's 638-only rule
+never fired and every case fell through to the 4.5-day ensemble.
+Evidence: on a reconstructed post-refresh stable page (history spans the
+refresh, last read 3,868, target 90 min later) R2 scores 0.050–0.173
+with typical miss 0.04 — matching live R2's 0.15285 / miss 0.04 — while
+persistence scores 0.0002. The top 1–5 score 0.000001 with persistence /
+counts on the same shape.
+
+R3 replaces the 638-only rule with a general short-horizon rule
+(horizon ≤ 240 min): frozen 638 page → rebuild the refresh with ZERO
+spread; any other short-horizon page → persist the last rate with ZERO
+spread (fast-move guard: > 0.5 logit/hour falls back to sigma 0.02).
+Pure persistence alone scores 1.6–1.8 on the shipped p00/p01, so the
+frozen-page branch is kept — the hybrid is robust to both practice
+shapes. The final (long-horizon) regime is UNCHANGED from R2.
+
+| case | R3 | R2 |
+|---|---|---|
+| p00/p01, truth E=58 (fitted) | **0.0002** | 0.0040 |
+| post-refresh flat page (stable) | **0.0002** | 0.0497 |
+| post-refresh spanning page (stable) | **0.0002** | 0.1733 |
+| p00/p01, truth E=1.3 / E=0 / E=103 | 0.167 / 0.171 / 0.115 | 0.153 / 0.157 / 0.101 |
+
+Local practice loss for R3: **0.0002** (top 10 needs < 0.0006; top 3
+needs 0.000001; the 0.0002 is the 4-decimal rounding floor against a
+full-precision reconstructed truth — on the real 2-decimal Exophase
+reads the stable-page forecast matches exactly). Expected live rank
+top 3–10.
+
+Synthetic finals (sim.py, seeds 1–6): R3 mean **0.0765**, identical to
+R2 (the final regime is unchanged). Stress finals could not be re-run:
+`stress.py` imports `tune.py`, which expects `main.Z` and a
+`marginal_rates` API that R2's refactor removed (pre-existing harness
+breakage, not caused by R3). Fixes 2–4 from the top-3 evaluation
+(practice-peek spread calibration, final-curve shrinkage, pooled
+marginal shares) are HELD for a later round: they change the validated
+final regime and cannot be fully validated without the stress harness.
+
 ## Practice cuts (p00, p01) — the scored trial
 
 The rules publish the launch-night refresh: 638 players / 943 trophies

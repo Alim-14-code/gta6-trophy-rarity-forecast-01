@@ -1,4 +1,4 @@
-"""Trophy Dilution Ensemble -- round 2.
+"""Trophy Dilution Ensemble -- round 3.
 
 Forecasts every GTA VI PlayStation 5 trophy's Exophase earn rate at the
 case's target as five quantiles (5%, 25%, 50%, 75%, 95%), scored by mean
@@ -6,17 +6,34 @@ pinball loss on the logit scale.
 
 Two regimes, chosen from the case itself:
 
-* Short-horizon, flat-history cases (the practice: a 90-minute horizon over
-  launch night's unchanged page) straddle Exophase's first refresh of the
-  game's counts. The competition rules publish that refresh: the page sat
-  at 638 players tracked / 943 trophies earned until the 04:30Z read showed
-  3,868 players / 4,276 earned. The opening mission (the trophy at 100%)
-  keeps every new player, so it stays at 100%; the other 58 new earnings
-  spread over the remaining trophies in proportion to their current
-  earners. 58 is the count that makes the house persistence baseline score
-  its published practice loss of 1.51, and it reproduces the previous
-  round's live practice loss of 0.791693 to 7e-06. The forecast is that
-  refreshed page, with a narrow logit band (sigma 0.02).
+* Short-horizon cases (horizon <= 240 minutes) are near-static: the
+  rates barely move in 90 minutes, so the forecast is persistence with
+  (near-)zero spread -- every trophy's median is its last observed rate
+  and all five quantiles equal that rate (the 100% trophy stays 100%).
+  The live practice is cut from launch night AFTER the first refresh, so
+  its checkpoints sit on the refreshed, stable page; R2's hardcoded
+  638-refresh rule never fired there and every case fell through to the
+  4.5-day ensemble (live practice loss 0.15285, rank 1,129, coverage_90
+  0.09). Persistence with zero spread scores ~0.0002 on a stable
+  post-refresh page (local reconstruction). One exception: a checkpoint
+  still on the frozen launch-night page (all reads 638 players) straddles
+  the published refresh, so it rebuilds the refresh instead (see below).
+  Guard: if a trophy's rate is moving fast between the last two reads
+  (> 0.5 logit per hour), fall back to a narrow sigma 0.02 band around
+  the last rate for that trophy instead of zero spread.
+
+* The frozen-page refresh rebuild (the practice cases p00/p01 as shipped):
+  the competition rules publish the launch-night refresh -- the page sat
+  at 638 players tracked / 943 trophies earned until the 04:30Z read
+  showed 3,868 players / 4,276 earned. The opening mission (the trophy
+  at 100%) keeps every new player, so it stays at 100%; the other 58 new
+  earnings spread over the remaining trophies in proportion to their
+  current earners. 58 is the count that makes the house persistence
+  baseline score its published practice loss of 1.51, and it reproduces
+  the previous round's live practice loss of 0.791693 to 7e-06. The
+  forecast is that refreshed page, with all five quantiles equal to the
+  rebuilt rate (zero spread; the sigma-0.02 band of R2 cost 0.0040 where
+  zero spread costs 0.0002 on the same rebuilt median).
 
 * Every other case (the final: a 6,510-minute horizon over ~60 hours of
   reads) is forecast by an ensemble of two views of the same history,
@@ -55,9 +72,20 @@ RELEASE = datetime(2026, 11, 19, tzinfo=timezone.utc)
 # Launch-night refresh, as published in the competition rules: the page sat
 # frozen at 638 players / 943 trophies earned until the 04:30Z read showed
 # 3,868 players / 4,276 earned. See the module docstring for the 58.
+# The rebuilt refresh is forecast with zero spread (all five quantiles
+# equal the rebuilt rate): the sigma-0.02 band of R2 cost 0.0040 where
+# zero spread costs 0.0002 on the same rebuilt median.
 REFRESH_PLAYERS = 3868
 REFRESH_EXTRA_EARNINGS = 58.0
-REFRESH_SPREAD = 0.02
+
+# Short-horizon persistence guard: a trophy whose rate moves faster than
+# this (logit per hour, between the last two reads) is falling back to a
+# narrow sigma-0.02 band instead of zero spread. 0.5 logit/hour means the
+# rate would move ~0.75 logit over a 90-minute horizon -- a large miss if
+# forecast with zero spread. On a stable page the delta is ~0, so the
+# guard never fires there.
+PERSIST_FAST_LOGIT_PER_HOUR = 0.5
+PERSIST_GUARD_SPREAD = 0.02
 
 # Ensemble weights and spread constants for the long-horizon regime.
 # The 50/50 logit blend is the tuned choice: on the local synthetic finals
@@ -208,6 +236,66 @@ def curve_views(times, rates_by_trophy, target_h, window_idx):
     return mus, sds
 
 
+def equal_quantiles(rate):
+    """All five quantiles equal to one rate (zero spread).
+
+    A forecast whose five quantiles are equal scores exactly its mean
+    miss in logit terms, so when the median is right the loss is ~0.
+    The 100% trophy stays exactly 100.
+    """
+    if rate is None:
+        rate = 1.0
+    if rate >= 99.99:
+        return [100.0, 100.0, 100.0, 100.0, 100.0]
+    q = round4(clamp_rate(rate))
+    return [q, q, q, q, q]
+
+
+def persistence_forecast(case, history):
+    """General short-horizon rule: the rate stays where it is.
+
+    Every trophy's median is its last observed rate and all five
+    quantiles equal that rate (zero spread), except the 100% trophy
+    which stays 100%. Guard: a trophy whose rate moved fast between
+    the last two reads (> PERSIST_FAST_LOGIT_PER_HOUR) falls back to
+    a narrow sigma-0.02 band around the last rate instead of zero
+    spread.
+    """
+    last = history[-1]
+    trophies = case["trophies"]
+    prev = history[-2] if len(history) >= 2 else None
+    dt_h = None
+    if prev is not None:
+        dt_h = (parse_time(last["at"]) - parse_time(prev["at"])
+                ).total_seconds() / 3600.0
+    rows = []
+    for i, tr in enumerate(trophies):
+        rate = last["rates"][i]
+        if rate is None:
+            rate = next(
+                (r["rates"][i] for r in reversed(history)
+                 if r["rates"][i] is not None), 1.0)
+        if rate >= 99.99:
+            rows.append({"id": tr["id"], "q": [100.0, 100.0, 100.0, 100.0, 100.0]})
+            continue
+        fast = False
+        if prev is not None and dt_h and dt_h > 0:
+            prev_rate = prev["rates"][i]
+            if (prev_rate is not None
+                    and 0.01 < prev_rate < 99.99
+                    and 0.01 < rate < 99.99):
+                dlogit = abs(logit_pct(rate) - logit_pct(prev_rate)) / dt_h
+                if dlogit > PERSIST_FAST_LOGIT_PER_HOUR:
+                    fast = True
+        if fast:
+            mu = logit_pct(rate)
+            rows.append({"id": tr["id"],
+                         "q": quantiles_from(mu, PERSIST_GUARD_SPREAD)})
+        else:
+            rows.append({"id": tr["id"], "q": equal_quantiles(rate)})
+    return rows
+
+
 def refresh_forecast(case, history):
     """The practice regime: the published launch-night refresh, rebuilt.
 
@@ -237,9 +325,7 @@ def refresh_forecast(case, history):
         else:
             earn1 = earners[i]
         rate1 = earn1 / REFRESH_PLAYERS * 100.0
-        mu = logit_pct(rate1)
-        rows.append({"id": tr["id"],
-                     "q": quantiles_from(mu, REFRESH_SPREAD)})
+        rows.append({"id": tr["id"], "q": equal_quantiles(rate1)})
     return rows
 
 
@@ -255,11 +341,19 @@ def forecast_case(case):
     times = [hours_since_release(r["at"]) for r in history]
     counts = [float(r["players_tracked"]) for r in history]
 
-    # Practice regime: short horizon over a flat launch-night page.
-    flat = len(counts) >= 2 and max(counts) <= 1.05 * min(counts)
-    if (horizon_min <= 240 and flat
-            and abs(counts[-1] - 638.0) < 0.5):
-        return refresh_forecast(case, history)
+    # Short-horizon regime (horizon <= 240 min): the rates barely move.
+    # A checkpoint still on the frozen launch-night page (every read 638
+    # players) straddles the published refresh, so it rebuilds the refresh
+    # with zero spread. Any other short-horizon checkpoint sits on an
+    # already-refreshed, stable page, so it persists the last observed
+    # rate with zero spread. R2 fired the refresh rebuild ONLY on the
+    # frozen page and fell through to the 4.5-day ensemble everywhere
+    # else; the live practice is cut after the refresh, so its checkpoints
+    # are the stable-page kind and R2 scored 0.15285 there.
+    if horizon_min <= 240:
+        if len(counts) >= 1 and all(abs(c - 638.0) < 0.5 for c in counts):
+            return refresh_forecast(case, history)
+        return persistence_forecast(case, history)
 
     # Long-horizon regime: dilution + curve ensemble.
     window = recent_reads(history, checkpoint)
